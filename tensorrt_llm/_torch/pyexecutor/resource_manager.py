@@ -1,7 +1,7 @@
 import math
 from abc import ABC, abstractmethod
 from collections import OrderedDict
-from typing import Dict, List, Optional, Union
+from typing import TYPE_CHECKING, Dict, List, Optional, Tuple, Union
 
 import torch
 
@@ -21,6 +21,9 @@ if ENABLE_MULTI_DEVICE:
 
     from tensorrt_llm._utils import mpi_comm
 
+if TYPE_CHECKING:
+    from ..speculative.interface import SpecConfig
+
 KVCacheManagerCpp = tensorrt_llm.bindings.internal.batch_manager.KVCacheManager
 KvCacheConfigCpp = tensorrt_llm.bindings.KvCacheConfig
 CacheTypeCpp = tensorrt_llm.bindings.internal.batch_manager.CacheType
@@ -30,6 +33,7 @@ KVCacheEventManagerCpp = tensorrt_llm.bindings.internal.batch_manager.KVCacheEve
 RequestList = list[LlmRequest]
 PeftCacheManagerCpp = tensorrt_llm.bindings.internal.batch_manager.PeftCacheManager
 PeftCacheConfig = tensorrt_llm.bindings.executor.PeftCacheConfig
+WorldConfig = tensorrt_llm.bindings.WorldConfig
 
 
 def compute_page_count(token_count: int, tokens_per_page: int) -> int:
@@ -59,28 +63,23 @@ class BaseResourceManager(ABC):
         pass
 
 
-class DummyKvCacheManager(BaseResourceManager):
+def get_pp_layers(
+    num_layers: int,
+    mapping: Mapping,
+    spec_config: Optional["SpecConfig"] = None,
+) -> Tuple[List[int], int]:
+    from ..speculative.utils import get_num_spec_layers
 
-    def __init__(self,
-                 block_count: int,
-                 max_num_tokens: int,
-                 block_size: int = 64):
-        super(BaseResourceManager, self).__init__()
-        self.block_count = block_count
-        self.max_num_tokens = max_num_tokens
-        self.block_size = block_size
-
-    def get_max_resource_count(self) -> int:
-        return self.block_count
-
-    def get_needed_resource_to_completion(self, request: LlmRequest) -> int:
-        max_new_tokens = request.max_new_tokens if request.max_new_tokens is not None else self.max_num_tokens - request.orig_prompt_len
-        context_token_count = request.orig_prompt_len
-        num_context_blocks = context_token_count // self.block_size
-        remaining_tokens = context_token_count + max_new_tokens - num_context_blocks * self.block_size
-        need_blocks = num_context_blocks + math.ceil(
-            remaining_tokens / self.block_size)
-        return need_blocks
+    pp_layers = mapping.pp_layers(num_layers)
+    if spec_config is not None:
+        num_spec_layers = get_num_spec_layers(spec_config)
+        num_layers += num_spec_layers
+        if mapping.is_last_pp_rank():
+            pp_layers.extend(range(num_layers - num_spec_layers, num_layers))
+    if len(pp_layers) == 0:
+        # Don't support empty KV cache for now, provide at least 1 layer
+        pp_layers.append(0)
+    return pp_layers, num_layers
 
 
 class KVCacheManager(BaseResourceManager):
@@ -100,14 +99,18 @@ class KVCacheManager(BaseResourceManager):
         max_batch_size: int,
         mapping: Mapping,
         dtype: DataType = DataType.HALF,
-        # Some speculative decoding methods need to use different kv lengths for the
-        # draft/target layers. Add extra tokens to haddle this issue.
-        num_extra_kv_tokens: int = 0,
+        spec_config: Optional["SpecConfig"] = None,
     ) -> None:
-        self.num_layers = num_layers
         self.mapping = mapping
         self.dtype = dtype
         self.kv_cache_type = kv_cache_type
+        self.pp_layers, self.num_layers = get_pp_layers(num_layers, mapping,
+                                                        spec_config)
+        self.num_local_layers = len(self.pp_layers)
+        self.layer_offsets = {
+            idx: offset
+            for offset, idx in enumerate(self.pp_layers)
+        }
 
         tp_size = mapping.tp_size
         if mapping.enable_attention_dp:
@@ -116,24 +119,22 @@ class KVCacheManager(BaseResourceManager):
         if isinstance(num_kv_heads, int):
             self.num_kv_heads_per_layer = [
                 (num_kv_heads + tp_size - 1) // tp_size
-                for _ in range(num_layers)
+                for _ in range(self.num_local_layers)
             ]
 
         else:
             assert len(num_kv_heads) == self.num_layers
 
             self.num_kv_heads_per_layer = []
-            for layer_idx, kv_head in enumerate(num_kv_heads):
-                if kv_head is not None:
-                    self.num_kv_heads_per_layer.append(
-                        (kv_head + tp_size - 1) // tp_size)
-                else:
-                    self.num_kv_heads_per_layer.append(0)
-
-        assert len(self.num_kv_heads_per_layer) > 0
-
-        self.is_homongenous = all(val == self.num_kv_heads_per_layer[0]
-                                  for val in self.num_kv_heads_per_layer[1:])
+            if self.num_local_layers > 0:
+                for kv_head in num_kv_heads[self.
+                                            pp_layers[0]:self.pp_layers[-1] +
+                                            1]:
+                    if kv_head is not None:
+                        self.num_kv_heads_per_layer.append(
+                            (kv_head + tp_size - 1) // tp_size)
+                    else:
+                        self.num_kv_heads_per_layer.append(0)
 
         self.num_kv_heads = num_kv_heads
         self.head_dim = head_dim
@@ -141,7 +142,9 @@ class KVCacheManager(BaseResourceManager):
         self.max_seq_len = max_seq_len
         self.max_batch_size = max_batch_size
         self.kv_factor = 1 if kv_cache_type == CacheTypeCpp.SELFKONLY else 2
-        self.num_extra_kv_tokens = num_extra_kv_tokens
+        # Some speculative decoding methods need to use different kv lengths for the
+        # draft/target layers. Add extra tokens to haddle this issue.
+        self.num_extra_kv_tokens = 0 if spec_config is None else spec_config.num_extra_kv_tokens
         self.event_buffer_max_size = kv_cache_config.event_buffer_max_size
 
         if kv_cache_config.max_attention_window is None:
@@ -295,6 +298,12 @@ class KVCacheManager(BaseResourceManager):
     def add_dummy_requests(
         self,
         request_ids: List[int],
+        # Note that token_nums should be past_kv_len + input_len (without
+        # spec decoding). The draft tokens will be added in this function,
+        # so we don't need to take care of it in the caller. When preparing
+        # token_nums, we should not take the draft tokens into account, so
+        # don't use the kv_cache_manager.max_seq_len, which includes both
+        # extra tokens and draft tokens.
         token_nums: Optional[List[int]] = None,
         is_gen: bool = False,
         prepare_resource: bool = True,
@@ -304,8 +313,7 @@ class KVCacheManager(BaseResourceManager):
         requests = []
         for i, req_id in enumerate(request_ids):
             sampling_params = SamplingParams()
-            token_num = token_nums[
-                i] if token_nums is not None else 1 + max_num_draft_tokens
+            token_num = token_nums[i] if token_nums is not None else 1
             encoder_input_tokens = [
                 1
             ] * token_num if self.impl.cross_kv else None
@@ -322,7 +330,7 @@ class KVCacheManager(BaseResourceManager):
                 self.impl.add_sequence(req_id, token_num, beam_width, req)
             if is_gen:
                 req.state = LlmRequestState.GENERATION_IN_PROGRESS
-                req.prompt_len = token_num - 1 + max_num_draft_tokens
+                req.prompt_len = token_num - 1
                 req.py_prompt_len = req.prompt_len
                 if max_num_draft_tokens > 0:
                     req.py_draft_tokens = [0] * max_num_draft_tokens
@@ -432,13 +440,18 @@ class KVCacheManager(BaseResourceManager):
     def get_num_kv_blocks(self, num_tokens: int) -> int:
         return (num_tokens + self.tokens_per_block - 1) // self.tokens_per_block
 
+    def get_num_available_tokens(self, max_num_draft_tokens: int = 0) -> int:
+        return (self.get_num_free_blocks() * self.tokens_per_block -
+                self.num_extra_kv_tokens - max_num_draft_tokens)
+
     def get_buffers(self, layer_idx: int) -> Optional[torch.Tensor]:
-        result = self.impl.get_primary_pool_data(layer_idx)
+        layer_offset = self.layer_offsets[layer_idx]
+        result = self.impl.get_primary_pool_data(layer_offset)
         return result.reshape(
             result.shape[0],
             self.kv_factor,
             self.tokens_per_block,
-            self.num_kv_heads_per_layer[layer_idx],
+            self.num_kv_heads_per_layer[layer_offset],
             self.head_dim,
         )
 
@@ -491,10 +504,17 @@ class MambaCacheManager(BaseResourceManager):
         # conv and ssm states device
         device = torch.device("cuda")
 
+        pp_layers, num_layers = get_pp_layers(num_layers, mapping)
+        num_local_layers = len(pp_layers)
+        self.mamba_layer_offsets = {
+            idx: offset
+            for offset, idx in enumerate(pp_layers)
+        }
+
         # mamba conv states
         self.conv_states = torch.empty(
             size=[
-                num_layers,
+                num_local_layers,
                 max_batch_size,
                 conv_dim,
                 d_conv,
@@ -506,7 +526,7 @@ class MambaCacheManager(BaseResourceManager):
         # mamba ssm states
         self.ssm_states = torch.empty(
             size=[
-                num_layers,
+                num_local_layers,
                 max_batch_size,
                 nheads,
                 d_state,
@@ -562,10 +582,12 @@ class MambaCacheManager(BaseResourceManager):
         return self.state_indices
 
     def get_conv_states(self, layer_idx: int) -> torch.Tensor:
-        return self.conv_states[layer_idx]
+        layer_offset = self.mamba_layer_offsets[layer_idx]
+        return self.conv_states[layer_offset]
 
     def get_ssm_states(self, layer_idx: int) -> torch.Tensor:
-        return self.ssm_states[layer_idx]
+        layer_offset = self.mamba_layer_offsets[layer_idx]
+        return self.ssm_states[layer_offset]
 
 
 class MambaHybridCacheManager(KVCacheManager, MambaCacheManager):
@@ -595,9 +617,7 @@ class MambaHybridCacheManager(KVCacheManager, MambaCacheManager):
         max_batch_size: int,
         mapping: Mapping,
         dtype: DataType = DataType.HALF,
-        # Some speculative decoding methods need to use different kv lengths for the
-        # draft/target layers. Add extra tokens to haddle this issue.
-        num_extra_kv_tokens: int = 0
+        spec_config: Optional["SpecConfig"] = None,
     ) -> None:
 
         # mamba hybrid cache requires block reuse to be disabled in KV cache config
@@ -622,7 +642,7 @@ class MambaHybridCacheManager(KVCacheManager, MambaCacheManager):
                                 max_batch_size=max_batch_size,
                                 mapping=mapping,
                                 dtype=dtype,
-                                num_extra_kv_tokens=num_extra_kv_tokens)
+                                spec_config=spec_config)
 
     def prepare_resources(self, scheduled_batch: ScheduledRequests):
         self.prepare_mamba_resources(scheduled_batch)
@@ -739,8 +759,10 @@ class ResourceManager:
 
 class PeftCacheManager(BaseResourceManager):
 
-    def __init__(self, peft_cache_config: PeftCacheConfig,
-                 model_config: ModelConfig):
+    def __init__(self,
+                 peft_cache_config: PeftCacheConfig,
+                 model_config: ModelConfig,
+                 world_config: WorldConfig | None = None):
         import tensorrt_llm.bindings as _tb
 
         peft_cache_manager_config = _tb.PeftCacheManagerConfig(
@@ -759,14 +781,12 @@ class PeftCacheManager(BaseResourceManager):
             lora_prefetch_dir=peft_cache_config.lora_prefetch_dir,
         )
 
-        # TODO smor- currently set manually, change that
-        world_config = _tb.WorldConfig()
+        if world_config is None:
+            world_config = _tb.WorldConfig()
 
         BufferManager = tensorrt_llm.bindings.internal.runtime.BufferManager
-        CudaStream = tensorrt_llm.bindings.internal.runtime.CudaStream
-        self._stream = torch.cuda.Stream().cuda_stream  # FIXME
-        cuda_stream = CudaStream(self._stream)
-        buffer_manager = BufferManager(cuda_stream, True)
+        buffer_manager = BufferManager(torch.cuda.current_stream().cuda_stream,
+                                       True)
         self.impl = PeftCacheManagerCpp(config=peft_cache_manager_config,
                                         model_config=model_config,
                                         world_config=world_config,

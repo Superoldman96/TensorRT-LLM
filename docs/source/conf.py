@@ -82,6 +82,7 @@ source_suffix = {
     '.rst': 'restructuredtext',
     '.txt': 'markdown',
     '.md': 'markdown',
+    '.json': 'json',
 }
 
 html_theme = 'nvidia_sphinx_theme'

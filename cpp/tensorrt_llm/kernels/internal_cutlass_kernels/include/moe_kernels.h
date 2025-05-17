@@ -17,11 +17,11 @@
 
 #pragma once
 #include "cutlass/gemm/gemm.h"
+#include "moe_gemm_kernels.h"
 #include "tensorrt_llm/common/assert.h"
 #include "tensorrt_llm/common/cudaUtils.h"
 #include "tensorrt_llm/common/quantization.h"
 #include "tensorrt_llm/kernels/cutlass_kernels/fp8_blockscale_gemm/fp8_blockscale_gemm.h"
-#include "tensorrt_llm/kernels/internal_cutlass_kernels/include/moe_gemm_kernels.h"
 #ifdef ENABLE_FP4
 #include <cuda_fp4.h>
 #endif
@@ -558,6 +558,7 @@ private:
     static TmaWarpSpecializedGroupedGemmInput computeStridesTmaWarpSpecialized(int64_t const* expert_first_token_offset,
         TmaWarpSpecializedGroupedGemmInput layout_info, int64_t num_tokens, int64_t expanded_num_tokens, int64_t gemm_n,
         int64_t gemm_k, int const num_experts_per_node, T const* in, WeightType const* weights,
+        TmaWarpSpecializedGroupedGemmInput::INT4GroupwiseParams::SFA const* w4a8_weight_scale_flat,
         float const* fp8_dequant, TmaWarpSpecializedGroupedGemmInput::ElementSF const* fp4_act_scale_flat,
         QuantParams::FP4Inputs::GemmInputs fp4_inputs, T const* bias, UnfusedGemmOutputType* output,
         cudaStream_t stream);
@@ -622,6 +623,7 @@ private:
         QuantParams& quant_params, cudaStream_t stream);
 
     T const* applyPrequantScale(void* smoothed_act, void const* permuted_data, void const* prequant_scales,
+        int const* permuted_token_selected_experts, int64_t const* num_valid_tokens_ptr,
         int64_t const expanded_num_rows, int64_t const seq_len, bool const use_awq, cudaStream_t stream);
 
     CubKeyValueSorter sorter_;

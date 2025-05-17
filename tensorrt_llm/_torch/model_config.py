@@ -108,10 +108,18 @@ class ModelConfig(Generic[TConfig]):
                 mixed_quant_config_file = model_dir / 'quant_cfg.json'
                 with open(mixed_quant_config_file) as fm:
                     mixed_quant_configs = json.load(fm)
+                    # kv_cache_quant_algo is global regardless of MIXED_PRECISION
                     kv_cache_quant_algo = mixed_quant_configs[
                         'kv_cache_quant_algo']
                     mixed_quant_configs = mixed_quant_configs[
                         'quantized_layers']
+                    if kv_cache_quant_algo is not None and quant_config.kv_cache_quant_algo is not None:
+                        if kv_cache_quant_algo != quant_config.kv_cache_quant_algo:
+                            raise RuntimeError(
+                                f"The kvcache config in 'quant_cfg.json', {kv_cache_quant_algo},"
+                                f"is different from 'hf_quant_config.json', {quant_config.kv_cache_quant_algo}!"
+                            )
+                    kv_cache_quant_algo = kv_cache_quant_algo or quant_config.kv_cache_quant_algo
 
                     for layer in mixed_quant_configs:
                         config = QuantConfig()
@@ -160,22 +168,18 @@ class ModelConfig(Generic[TConfig]):
                    quant_config_dict=layer_quant_config,
                    **kwargs)
 
-    def get_bindings_model_config(
-            self,
-            tensor_parallelism: int = 1,
-            context_parallelism: int = 1) -> "ModelConfigCpp":
+    def get_bindings_model_config(self) -> "ModelConfigCpp":
         """
         This method is used to construct the bindings config for the model.
         Currently it adheres to gptJsonConfig.cpp::createModelConfig, which assumes
         that an engine has been created.
         """
         # TODO smor- this isn't robust, and currently tested for LlamaConfig only
-        # TODO smor- currently parallelism is not supported, set default to 1
         # TODO smor- currently assuming no rnn layers, no MOE
         from tensorrt_llm.bindings import ModelConfig as ModelConfigCpp
 
         num_heads = self.pretrained_config.num_attention_heads // (
-            tensor_parallelism * context_parallelism)
+            self.mapping.tp_size * self.mapping.cp_size)
 
         model_config_cpp = ModelConfigCpp(
             vocab_size=self.pretrained_config.vocab_size,
@@ -187,7 +191,7 @@ class ModelConfig(Generic[TConfig]):
             data_type=torch_dtype_to_binding(
                 self.pretrained_config.torch_dtype))
 
-        mlp_hidden_size = self.pretrained_config.intermediate_size // tensor_parallelism
+        mlp_hidden_size = self.pretrained_config.intermediate_size // self.mapping.tp_size
         if "head_size" in self.pretrained_config:
             head_size = self.pretrained_config.head_size
         else:

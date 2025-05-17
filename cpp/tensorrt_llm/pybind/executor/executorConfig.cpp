@@ -18,17 +18,15 @@
 #include "executorConfig.h"
 #include "tensorrt_llm/executor/executor.h"
 #include "tensorrt_llm/executor/types.h"
-
+#include "tensorrt_llm/runtime/cudaStream.h"
+#include "tensorrt_llm/runtime/utils/mpiUtils.h"
+#include <optional>
 #include <pybind11/cast.h>
 #include <pybind11/functional.h>
 #include <pybind11/operators.h>
 #include <pybind11/pybind11.h>
 #include <pybind11/stl.h>
-
-#include "streamCaster.h"
-#include "tensorCaster.h"
-
-#include <optional>
+#include <torch/torch.h>
 #include <vector>
 
 namespace py = pybind11;
@@ -306,6 +304,7 @@ void initConfigBindings(pybind11::module_& m)
 
     auto logitsPostProcessorConfigGetstate = [](tle::LogitsPostProcessorConfig const& self)
     { return py::make_tuple(self.getProcessorMap(), self.getProcessorBatched(), self.getReplicate()); };
+
     auto logitsPostProcessorConfigSetstate = [](py::tuple const& state)
     {
         if (state.size() != 3)
@@ -435,7 +434,7 @@ void initConfigBindings(pybind11::module_& m)
             c.getExtendedRuntimePerfKnobConfig(), c.getDebugConfig(), c.getRecvPollPeriodMs(),
             c.getMaxSeqIdleMicroseconds(), c.getSpecDecConfig(), c.getGuidedDecodingConfig(),
             c.getAdditionalModelOutputs(), c.getCacheTransceiverConfig(), c.getGatherGenerationLogits(),
-            c.getUseVariableBeamWidthSearch(), c.getPromptTableOffloading());
+            c.getPromptTableOffloading(), c.getEnableTrtOverlap());
         auto pickle_tuple = py::make_tuple(cpp_states, py::getattr(self, "__dict__"));
         return pickle_tuple;
     };
@@ -480,8 +479,8 @@ void initConfigBindings(pybind11::module_& m)
             cpp_states[23].cast<std::optional<std::vector<tle::AdditionalModelOutput>>>(), // AdditionalModelOutputs
             cpp_states[24].cast<std::optional<tle::CacheTransceiverConfig>>(),             // CacheTransceiverConfig
             cpp_states[25].cast<bool>(),                                                   // GatherGenerationLogits
-            cpp_states[26].cast<bool>(),                                                   // UseVariableBeamWidthSearch
-            cpp_states[27].cast<bool>()                                                    // PromptTableOffloading
+            cpp_states[26].cast<bool>(),                                                   // PromptTableOffloading
+            cpp_states[27].cast<bool>()                                                    // EnableTrtOverlap
         );
 
         auto py_state = state[1].cast<py::dict>();
@@ -517,8 +516,8 @@ void initConfigBindings(pybind11::module_& m)
                  std::optional<std::vector<tle::AdditionalModelOutput>>, // AdditionalModelOutputs
                  std::optional<tle::CacheTransceiverConfig>,             // CacheTransceiverConfig
                  bool,                                                   // GatherGenerationLogits
-                 bool,                                                   // UseVariableBeamWidthSearch
-                 bool                                                    // PromptTableOffloading
+                 bool,                                                   // PromptTableOffloading
+                 bool                                                    // EnableTrtOverlap
                  >(),
             py::arg("max_beam_width") = 1, py::arg_v("scheduler_config", tle::SchedulerConfig(), "SchedulerConfig()"),
             py::arg_v("kv_cache_config", tle::KvCacheConfig(), "KvCacheConfig()"),
@@ -538,8 +537,8 @@ void initConfigBindings(pybind11::module_& m)
             py::arg("max_seq_idle_microseconds") = tle::ExecutorConfig::kDefaultMaxSeqIdleMicroseconds,
             py::arg("spec_dec_config") = py::none(), py::arg("guided_decoding_config") = py::none(),
             py::arg("additional_model_outputs") = py::none(), py::arg("cache_transceiver_config") = py::none(),
-            py::arg("gather_generation_logits") = false, py::arg("use_variable_beam_width_search") = false,
-            py::arg("mm_embedding_offloading") = false)
+            py::arg("gather_generation_logits") = false, py::arg("mm_embedding_offloading") = false,
+            py::arg("enable_trt_overlap") = false)
         .def_property("max_beam_width", &tle::ExecutorConfig::getMaxBeamWidth, &tle::ExecutorConfig::setMaxBeamWidth)
         .def_property("max_batch_size", &tle::ExecutorConfig::getMaxBatchSize, &tle::ExecutorConfig::setMaxBatchSize)
         .def_property("max_num_tokens", &tle::ExecutorConfig::getMaxNumTokens, &tle::ExecutorConfig::setMaxNumTokens)
@@ -585,10 +584,10 @@ void initConfigBindings(pybind11::module_& m)
             &tle::ExecutorConfig::setCacheTransceiverConfig)
         .def_property("gather_generation_logits", &tle::ExecutorConfig::getGatherGenerationLogits,
             &tle::ExecutorConfig::setGatherGenerationLogits)
-        .def_property("use_variable_beam_width_search", &tle::ExecutorConfig::getUseVariableBeamWidthSearch,
-            &tle::ExecutorConfig::setUseVariableBeamWidthSearch)
         .def_property("mm_embedding_offloading", &tle::ExecutorConfig::getPromptTableOffloading,
             &tle::ExecutorConfig::setPromptTableOffloading)
+        .def_property(
+            "enable_trt_overlap", &tle::ExecutorConfig::getEnableTrtOverlap, &tle::ExecutorConfig::setEnableTrtOverlap)
         .def(py::pickle(executorConfigGetState, executorConfigSetState));
 }
 

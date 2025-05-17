@@ -49,6 +49,7 @@ class AttentionMetadata:
     mapping: Optional[Mapping] = None
 
     enable_flash_mla: bool = False
+    enable_paged_context_mla: bool = False
     # Whether CUDA graph is enabled.
     is_cuda_graph: bool = field(default=False, repr=False)
 
@@ -167,7 +168,7 @@ class AttentionMetadata:
                 # This copy is safe because the batch size is guaranteed to not
                 # change in the CUDA graph case. The seqlens can change if we
                 # are doing spec decode.
-                self._seq_lens_cuda.copy_(self._seq_lens)
+                self._seq_lens_cuda.copy_(self._seq_lens, non_blocking=True)
             else:
                 self._seq_lens_cuda = self._seq_lens.cuda(non_blocking=True)
 
@@ -393,7 +394,7 @@ class RopeParams:
 
         if self.scale_type == RotaryScalingType.yarn:
             rope_inv_freq = None
-            rope_cos_sin = RopeEmbeddingUtils.create_sinusoidal_positions_yarn(
+            _, rope_cos_sin = RopeEmbeddingUtils.create_sinusoidal_positions_yarn(
                 self.max_positions,
                 self.dim,
                 self.theta,

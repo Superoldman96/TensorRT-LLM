@@ -71,6 +71,7 @@ torch::Tensor fp8_block_scale_moe_runner(torch::Tensor const& routing_logits, to
     args.local_num_experts = local_num_experts;
     args.routed_scaling_factor = routed_scaling_factor;
     args.intermediate_size = intermediate_size;
+    args.mUseDeepSeekFp8 = true;
 
     // allocate workspace for routing kernel
     at::Tensor num_tokens_per_expert
@@ -121,7 +122,8 @@ torch::Tensor fp8_block_scale_moe_runner(torch::Tensor const& routing_logits, to
         total_num_padded_tokens.data_ptr<int>(), expanded_idx_to_permuted_idx.data_ptr<int>(),
         nullptr /*permuted_idx_to_expanded_idx.data_ptr<int>()*/, permuted_idx_to_token_idx.data_ptr<int>(),
         expert_weights.data_ptr(), num_tokens_per_expert.data_ptr<int>(), cta_idx_xy_to_batch_idx.data_ptr<int>(),
-        cta_idx_xy_to_mn_limit.data_ptr<int>(), num_non_exiting_ctas.data_ptr<int>(), args.mDtypeElt, stream);
+        cta_idx_xy_to_mn_limit.data_ptr<int>(), num_non_exiting_ctas.data_ptr<int>(), args.mDtypeElt, false, true,
+        stream);
 
     // MoE kernel except routing
     TORCH_CHECK(hidden_states.scalar_type() == at::ScalarType::Float8_e4m3fn, "hidden_states must be fp8.");
@@ -184,9 +186,17 @@ torch::Tensor fp8_block_scale_moe_runner(torch::Tensor const& routing_logits, to
     args.output = output.data_ptr();
     args.output_scale = nullptr;
 
-    tensorrt_llm::kernels::trtllmGenFp8BlockScaleMoe::MoE::Runner moe_runner;
+    tensorrt_llm::kernels::trtllmGenFp8BlockScaleMoe::MoE::Runner moe_runner(args.mDtypeElt, args.mUseDeepSeekFp8);
+    auto workspace_sizes = moe_runner.getWorkspaceSizeInBytes(args);
+    at::Tensor workspace_fc1 = at::detail::empty_cuda(
+        {std::get<0>(workspace_sizes)}, at::ScalarType::Char, hidden_states.device(), std::nullopt);
+    at::Tensor workspace_fc2 = at::detail::empty_cuda(
+        {std::get<1>(workspace_sizes)}, at::ScalarType::Char, hidden_states.device(), std::nullopt);
+    workspace.bmm1_workspace = workspace_fc1.data_ptr();
+    workspace.bmm2_workspace = workspace_fc2.data_ptr();
+
     auto const& moe_stream = at::cuda::getCurrentCUDAStream(hidden_states.get_device());
-    moe_runner.run(args, workspace, moe_stream);
+    moe_runner.run(args, workspace, hidden_states.get_device(), moe_stream);
     return output;
 }
 } // namespace torch_ext

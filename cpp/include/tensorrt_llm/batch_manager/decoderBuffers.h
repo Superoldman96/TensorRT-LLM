@@ -40,14 +40,13 @@ public:
         SizeType32 maxBatchSize, SizeType32 maxDecoderSteps, runtime::BufferManager const& manager);
 
     // buffers for setup
-    TensorPtr setupBatchSlots;
     TensorPtr inputsIds;
-
-    // buffers for forward
-    TensorPtr forwardBatchSlotsRequestOrder;
-    TensorPtr forwardBatchSlotsRequestOrderDevice;
+    TensorPtr setupBatchSlots;
+    TensorPtr setupBatchSlotsDevice;
     TensorPtr fillValues;
     TensorPtr fillValuesDevice;
+
+    // buffers for forward
     std::vector<TensorPtr> forwardBatchSlots;
 };
 
@@ -127,9 +126,6 @@ public:
     static void bcast(DecoderOutputBuffers const& decoderOutputBuffers, DecoderBuffers const& decoderBuffers,
         bool returnLogProbs, SizeType32 maxBeamWidth, bool useMedusa, mpi::MpiComm const& commSession, int root);
 
-    static auto constexpr kMpiTagOffset = 0;
-    static auto constexpr kMpiTagUpperBound = kMpiTagOffset + 9;
-
 private:
     std::shared_ptr<mpi::MpiRequest> mRequest1;
     std::shared_ptr<mpi::MpiRequest> mRequest2;
@@ -176,10 +172,6 @@ public:
 
     static void recv(
         SlotDecoderBuffers const& slotDecoderBuffers, bool returnLogProbs, mpi::MpiComm const& commSession, int peer);
-
-    static auto constexpr kMpiTagOffset = 9;
-    static auto constexpr kMpiTagUpperBound = kMpiTagOffset + 4;
-    static_assert(kMpiTagOffset >= DecoderStepAsyncSend::kMpiTagUpperBound);
 
 private:
     std::shared_ptr<mpi::MpiRequest> mRequest1;

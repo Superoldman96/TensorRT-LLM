@@ -31,7 +31,7 @@ from ..modules.decoder_layer import DecoderLayer
 from ..modules.embedding import Embedding, LMHead
 from ..modules.gated_mlp import GatedMLP
 from ..modules.linear import TensorParallelMode
-from ..modules.logits_procesor import LogitsProcessor
+from ..modules.logits_processor import LogitsProcessor
 from ..modules.rms_norm import RMSNorm
 from .modeling_llama import LlamaAttention
 from .modeling_utils import duplicate_kv_weight, register_auto_model
@@ -159,7 +159,7 @@ class MllamaTextModel(nn.Module):
 
         residual = None
         for _, decoder_layer in enumerate(self.layers):
-            if decoder_layer == None:
+            if decoder_layer is None:
                 assert skip_cross_attention == True, 'Cross-attention is not supported yet'
             elif isinstance(decoder_layer, MllamaDecoderLayer):
                 hidden_states, residual = decoder_layer(

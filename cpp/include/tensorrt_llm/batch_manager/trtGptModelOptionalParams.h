@@ -37,6 +37,7 @@ class TrtGptModelOptionalParams
 public:
     using SizeType32 = tensorrt_llm::runtime::SizeType32;
 
+    // 23 parameters, 23 items in initialization list
     explicit TrtGptModelOptionalParams(KvCacheConfig kvCacheConfig = KvCacheConfig{}, bool enableTrtOverlap = false,
         std::optional<std::vector<SizeType32>> deviceIds = std::nullopt, bool normalizeLogProbs = true,
         bool enableChunkedContext = true,
@@ -85,8 +86,10 @@ public:
         }
     }
 
+    // 2 parameters, 23 items in initialization list
     explicit TrtGptModelOptionalParams(executor::ExecutorConfig const& executorConfig, bool isLeaderInOrchMode)
-        : TrtGptModelOptionalParams(KvCacheConfig(executorConfig.getKvCacheConfig()), false,
+        : TrtGptModelOptionalParams(KvCacheConfig(executorConfig.getKvCacheConfig()),
+            executorConfig.getEnableTrtOverlap(),
             executorConfig.getParallelConfig().value_or(executor::ParallelConfig()).getDeviceIds(),
             executorConfig.getNormalizeLogProbs(), executorConfig.getEnableChunkedContext(),
             PeftCacheManagerConfig(executorConfig.getPeftCacheConfig().value_or(executor::PeftCacheConfig())),

@@ -211,16 +211,6 @@ void initBindings(pybind11::module_& m)
         .def_readwrite("scalingVecPointer", &tr::LoraCache::TaskLayerModuleConfig::scalingVecPointer)
         .def(py::self == py::self);
 
-    py::classh<tr::CudaStream>(m, "CudaStream")
-        .def(py::init(
-                 [](py::object py_stream)
-                 {
-                     cudaStream_t stream = reinterpret_cast<cudaStream_t>(py_stream.cast<uintptr_t>());
-                     return tr::CudaStream{stream};
-                 }),
-            py::arg("stream_ptr"))
-        .def("get_device", &tr::CudaStream::getDevice);
-
     py::classh<tr::BufferManager>(m, "BufferManager")
         .def(py::init<tr::BufferManager::CudaStreamPtr, bool>(), py::arg("stream"), py::arg("trim_pool") = false)
         .def_property_readonly("stream", &tr::BufferManager::getStream);
@@ -306,11 +296,6 @@ void initBindings(pybind11::module_& m)
     py::class_<tr::decoder_batch::Output>(m, "DecoderBatchOutput")
         .def(py::init())
         .def_readwrite("cache_indirection", &tr::decoder_batch::Output::cacheIndirection);
-
-    py::class_<tr::decoder::Input>(m, "Input")
-        .def(py::init<tr::ITensor::SharedPtr>(), py::arg("logits"))
-        .def_readwrite("logits", &tr::decoder::Input::logits)
-        .def_readwrite("cache_indirection", &tr::decoder::Input::cacheIndirection);
 
     py::class_<tr::LookaheadDecodingBuffers>(m, "LookaheadDecodingBuffers")
         .def(py::init<tr::SizeType32, tr::SizeType32, tr::BufferManager const&>(), py::arg("max_num_sequences"),

@@ -19,7 +19,8 @@ from tensorrt_llm.llmapi import (EagleDecodingConfig, LookaheadDecodingConfig,
 from tensorrt_llm.quantization import QuantAlgo
 
 from ..conftest import (llm_models_root, parametrize_with_ids, skip_no_nvls,
-                        skip_pre_ada, skip_pre_blackwell, skip_pre_hopper)
+                        skip_post_blackwell, skip_pre_ada, skip_pre_blackwell,
+                        skip_pre_hopper)
 from .accuracy_core import (MMLU, CliFlowAccuracyTestHarness, CnnDailymail,
                             Humaneval, PassKeyRetrieval64k,
                             PassKeyRetrieval128k, SlimPajama6B, ZeroScrolls)
@@ -57,6 +58,7 @@ class TestGpt2(CliFlowAccuracyTestHarness):
     def test_int8_kv_cache(self):
         self.run(kv_cache_quant_algo=QuantAlgo.INT8)
 
+    @skip_post_blackwell
     @parametrize_with_ids("per_token,per_channel", [(False, False),
                                                     (True, True)])
     def test_smooth_quant(self, per_token: bool, per_channel: bool):
@@ -82,6 +84,14 @@ class TestGpt2(CliFlowAccuracyTestHarness):
         self.run(extra_acc_spec="beam_width=256",
                  extra_build_args=["--max_beam_width=256"],
                  extra_summarize_args=["--num_beams=256"])
+
+    def test_variable_beam_width_search(self, mocker):
+        mocker.patch.object(CnnDailymail, "MAX_BATCH_SIZE", 1)
+        self.run(extra_acc_spec="beam_width=8;beam_width_array=[2,3,4,5]",
+                 extra_build_args=["--max_beam_width=8"],
+                 extra_summarize_args=[
+                     "--num_beams=5", "--beam_width_array=[2,3,4,5]"
+                 ])
 
     def test_weight_streaming_ootb(self):
         self.run(extra_build_args=[
@@ -142,6 +152,7 @@ class TestStarcoder2_15B(CliFlowAccuracyTestHarness):
     MODEL_PATH = f"{llm_models_root()}/starcoder2-model"
     EXAMPLE_FOLDER = "models/core/gpt"
 
+    @skip_post_blackwell
     def test_smooth_quant_ootb(self):
         self.run(tasks=[Humaneval(self.MODEL_NAME)],
                  quant_algo=QuantAlgo.W8A8_SQ_PER_CHANNEL)
@@ -194,9 +205,11 @@ class TestPhi2(CliFlowAccuracyTestHarness):
     MODEL_PATH = f"{llm_models_root()}/phi-2"
     EXAMPLE_FOLDER = "models/core/phi"
 
+    @skip_post_blackwell
     def test_auto_dtype(self):
         self.run(dtype='auto')
 
+    @skip_post_blackwell
     @pytest.mark.skip_less_device(2)
     def test_tp2(self):
         self.run(tp_size=2)
@@ -316,6 +329,7 @@ class TestVicuna7B(CliFlowAccuracyTestHarness):
                  extra_build_args=["--speculative_decoding_mode=medusa"],
                  extra_summarize_args=extra_summarize_args)
 
+    @skip_post_blackwell
     @parametrize_with_ids("cuda_graph,chunked_context,typical_acceptance",
                           [(False, False, False), (True, False, False),
                            (True, True, False), (True, False, True)])
@@ -360,6 +374,7 @@ class TestLlama7B(CliFlowAccuracyTestHarness):
                  extra_build_args=["--max_beam_width=5"],
                  extra_summarize_args=["--num_beams=5"])
 
+    @skip_post_blackwell
     def test_int4_gptq(self):
         self.run(
             quant_algo=QuantAlgo.W4A16_GPTQ,
@@ -386,6 +401,7 @@ class TestLlama2_7B(CliFlowAccuracyTestHarness):
     def test_auto_dtype(self):
         self.run(dtype='auto')
 
+    @skip_post_blackwell
     def test_smooth_quant(self):
         self.run(quant_algo=QuantAlgo.W8A8_SQ_PER_CHANNEL_PER_TOKEN_PLUGIN)
 
@@ -413,34 +429,41 @@ class TestLlama2_7B(CliFlowAccuracyTestHarness):
     def test_tp2cp2(self):
         self.run(tp_size=2, cp_size=2)
 
-    @skip_pre_ada
+    @skip_pre_hopper
     def test_fp8_gemm_plugin(self):
         self.run(quant_algo=QuantAlgo.FP8,
                  kv_cache_quant_algo=QuantAlgo.FP8,
                  extra_build_args=["--gemm_plugin=fp8"])
 
-    @skip_pre_ada
+    @skip_pre_hopper
+    @skip_post_blackwell
     def test_fp8_gemm_swiglu_plugin(self):
+        # gemm_swiglu_plugin=fp8 is not supported on SM 100.
         self.run(
             quant_algo=QuantAlgo.FP8,
             kv_cache_quant_algo=QuantAlgo.FP8,
             extra_build_args=["--gemm_plugin=fp8", "--gemm_swiglu_plugin=fp8"])
 
-    @skip_pre_ada
+    @skip_pre_hopper
+    @skip_post_blackwell
     def test_fp8_low_latency_gemm_plugin(self):
+        # low_latency_gemm_plugin=fp8 is not supported on SM 100.
         self.run(quant_algo=QuantAlgo.FP8,
                  kv_cache_quant_algo=QuantAlgo.FP8,
                  extra_build_args=["--low_latency_gemm_plugin=fp8"])
 
     @pytest.mark.skip_less_device(2)
+    @skip_post_blackwell
     def test_smooth_quant_ootb_tp2(self):
         self.run(quant_algo=QuantAlgo.W8A8_SQ_PER_CHANNEL, tp_size=2)
 
     @pytest.mark.skip_less_device(2)
+    @skip_post_blackwell
     def test_int4_awq_tp2(self):
         self.run(quant_algo=QuantAlgo.W4A16_AWQ, tp_size=2)
 
     @pytest.mark.skip_less_device(2)
+    @skip_post_blackwell
     def test_int4_awq_prequantized_tp2(self, mocker):
         mocker.patch.object(
             self.__class__, "MODEL_PATH",
@@ -448,6 +471,7 @@ class TestLlama2_7B(CliFlowAccuracyTestHarness):
         self.run(quant_algo=QuantAlgo.W4A16_AWQ, tp_size=2)
 
     @pytest.mark.skip_less_device(2)
+    @skip_post_blackwell
     def test_int4_gptq_prequantized_tp2(self, mocker):
         mocker.patch.object(
             self.__class__, "MODEL_PATH",
@@ -469,16 +493,19 @@ class TestTinyLlama1_1BChat(CliFlowAccuracyTestHarness):
     def test_float32(self):
         self.run(dtype='float32')
 
+    @skip_post_blackwell
     @pytest.mark.parametrize("precision", ["int8", "int4"])
     def test_weight_only(self, precision: str):
         quant_algo = QuantAlgo.W8A16 if precision == "int8" else QuantAlgo.W4A16
         self.run(quant_algo=quant_algo)
 
+    @skip_post_blackwell
     @pytest.mark.parametrize("precision", ["int8", "int4"])
     def test_weight_only_int8_kv_cache(self, precision: str):
         quant_algo = QuantAlgo.W8A16 if precision == "int8" else QuantAlgo.W4A16
         self.run(quant_algo=quant_algo, kv_cache_quant_algo=QuantAlgo.INT8)
 
+    @skip_post_blackwell
     @pytest.mark.parametrize("precision", ["int8", "int4"])
     def test_weight_only_manage_weights(self, precision: str):
         quant_algo = QuantAlgo.W8A16 if precision == "int8" else QuantAlgo.W4A16
@@ -567,6 +594,7 @@ class TestLlama3_1_8B(CliFlowAccuracyTestHarness):
     def test_auto_dtype(self):
         self.run(dtype='auto')
 
+    @skip_post_blackwell
     def test_smooth_quant(self):
         self.run(quant_algo=QuantAlgo.W8A8_SQ_PER_CHANNEL_PER_TOKEN_PLUGIN)
 
@@ -575,12 +603,14 @@ class TestLlama3_1_8B(CliFlowAccuracyTestHarness):
         self.run(quant_algo=QuantAlgo.FP8, kv_cache_quant_algo=QuantAlgo.FP8)
 
     @skip_pre_ada
+    @skip_post_blackwell
     def test_fp8_rowwise(self):
         self.run(tasks=[CnnDailymail(self.MODEL_NAME),
                         MMLU(self.MODEL_NAME)],
                  quant_algo=QuantAlgo.FP8_PER_CHANNEL_PER_TOKEN)
 
     @skip_pre_ada
+    @skip_post_blackwell
     def test_fp8_rowwise_meta_recipe(self):
         self.run(quant_algo=QuantAlgo.FP8_PER_CHANNEL_PER_TOKEN,
                  extra_acc_spec="meta_recipe",
@@ -601,6 +631,7 @@ class TestLlama3_1_8B(CliFlowAccuracyTestHarness):
             extra_build_args=extra_build_args)
 
     @skip_pre_ada
+    @skip_post_blackwell
     @pytest.mark.skip_less_device(4)
     @pytest.mark.parametrize(
         "gemm_allreduce", [False, pytest.param(True, marks=skip_no_nvls)],
@@ -616,6 +647,7 @@ class TestLlama3_1_8B(CliFlowAccuracyTestHarness):
             tp_size=4,
             extra_build_args=extra_build_args)
 
+    @skip_post_blackwell
     @skip_pre_ada
     def test_autoq(self):
         self.run(tasks=[CnnDailymail(self.MODEL_NAME),
@@ -646,6 +678,7 @@ class TestLlama3_1_8BInstruct(CliFlowAccuracyTestHarness):
         self.run(quant_algo=QuantAlgo.FP8, kv_cache_quant_algo=QuantAlgo.FP8)
 
     @skip_pre_ada
+    @skip_post_blackwell
     def test_medusa_fp8_prequantized(self, mocker):
         # nvidia/Llama-3.1-8B-Medusa-FP8
         mocker.patch.object(self.__class__, "MODEL_PATH",
@@ -670,23 +703,29 @@ class TestLlama3_2_1B(CliFlowAccuracyTestHarness):
     def test_auto_dtype(self):
         self.run(dtype='auto')
 
+    @skip_post_blackwell
     def test_smooth_quant(self):
         self.run(quant_algo=QuantAlgo.W8A8_SQ_PER_CHANNEL_PER_TOKEN_PLUGIN)
 
+    @skip_post_blackwell
     def test_smooth_quant_ootb(self):
         self.run(quant_algo=QuantAlgo.W8A8_SQ_PER_CHANNEL)
 
+    @skip_post_blackwell
     def test_smooth_quant_ootb_manage_weights(self):
         self.run(quant_algo=QuantAlgo.W8A8_SQ_PER_CHANNEL,
                  extra_build_args=["--fast_build"])
 
+    @skip_post_blackwell
     def test_int4_awq(self):
         self.run(quant_algo=QuantAlgo.W4A16_AWQ)
 
+    @skip_post_blackwell
     def test_int4_awq_int8_kv_cache(self):
         self.run(quant_algo=QuantAlgo.W4A16_AWQ,
                  kv_cache_quant_algo=QuantAlgo.INT8)
 
+    @skip_post_blackwell
     def test_int4_awq_manage_weights(self):
         self.run(quant_algo=QuantAlgo.W4A16_AWQ,
                  extra_build_args=["--fast_build"])
@@ -733,10 +772,12 @@ class TestLlama3_2_1B(CliFlowAccuracyTestHarness):
                  pp_size=2)
 
     @skip_pre_ada
+    @skip_post_blackwell
     def test_fp8_rowwise(self):
         self.run(quant_algo=QuantAlgo.FP8_PER_CHANNEL_PER_TOKEN)
 
     @skip_pre_ada
+    @skip_post_blackwell
     def test_fp8_rowwise_meta_recipe(self):
         self.run(quant_algo=QuantAlgo.FP8_PER_CHANNEL_PER_TOKEN,
                  extra_acc_spec="meta_recipe",
@@ -766,6 +807,44 @@ class TestLlama3_2_1B(CliFlowAccuracyTestHarness):
                  ])
 
 
+class TestMistral7B(CliFlowAccuracyTestHarness):
+    MODEL_NAME = "mistralai/Mistral-7B-v0.1"
+    MODEL_PATH = f"{llm_models_root()}/mistral-7b-v0.1"
+    EXAMPLE_FOLDER = "models/core/llama"
+
+    @skip_pre_blackwell
+    def test_beam_search(self):
+        self.run(extra_acc_spec="beam_width=4",
+                 extra_build_args=["--gemm_plugin=auto", "--max_beam_width=4"],
+                 extra_summarize_args=["--num_beams=4"])
+        import gc
+
+        import torch
+        for num_beams in [1, 2]:
+            gc.collect()
+            torch.cuda.empty_cache()
+            self.extra_acc_spec = f"beam_width={num_beams}"
+            self.extra_summarize_args = [f"--num_beams={num_beams}"]
+            self.evaluate()
+
+    @skip_pre_ada
+    @pytest.mark.skip_less_device(8)
+    def test_fp8_tp4pp2(self):
+        self.run(quant_algo=QuantAlgo.FP8,
+                 tp_size=4,
+                 pp_size=2,
+                 extra_convert_args=["--calib_size=4"],
+                 extra_build_args=["--gemm_plugin=auto"])
+
+    @skip_post_blackwell
+    @pytest.mark.skip_less_device(4)
+    def test_smooth_quant_tp4pp1(self):
+        self.run(quant_algo=QuantAlgo.W8A8_SQ_PER_CHANNEL_PER_TOKEN_PLUGIN,
+                 tp_size=4,
+                 pp_size=1,
+                 extra_build_args=["--gemm_plugin=auto"])
+
+
 class TestMixtral8x7B(CliFlowAccuracyTestHarness):
     MODEL_NAME = "mistralai/Mixtral-8x7B-v0.1"
     MODEL_PATH = f"{llm_models_root()}/Mixtral-8x7B-v0.1"
@@ -775,6 +854,43 @@ class TestMixtral8x7B(CliFlowAccuracyTestHarness):
     @pytest.mark.skip_less_device_memory(80000)
     def test_tp2(self):
         self.run(dtype='auto', tp_size=2)
+
+    @skip_post_blackwell
+    @pytest.mark.skip_less_device(8)
+    @pytest.mark.skip_less_device_memory(45000)
+    @pytest.mark.parametrize(
+        "moe_tp_size", [1, 4, 8],
+        ids=['expert_parallel', 'mixed_parallel', 'tensor_parallel'])
+    def test_ootb_except_mha_tp8(self, moe_tp_size):
+        self.run(tp_size=8,
+                 extra_convert_args=[
+                     f"--moe_tp_size={moe_tp_size}",
+                     f"--moe_ep_size={8 // moe_tp_size}",
+                     f"--moe_renorm_mode={0}"
+                 ],
+                 extra_build_args=[
+                     "--gemm_plugin=disable", "--moe_plugin=disable",
+                     f"--max_seq_len={8192}"
+                 ])
+
+    @pytest.mark.skip_less_device(8)
+    @pytest.mark.skip_less_device_memory(45000)
+    @pytest.mark.parametrize(
+        "moe_tp_size", [1, 4, 8],
+        ids=['expert_parallel', 'mixed_parallel', 'tensor_parallel'])
+    @pytest.mark.parametrize("moe_renorm_mode", [0, 1],
+                             ids=['no_renormalize', 'renormalize'])
+    def test_plugin_tp8(self, moe_tp_size, moe_renorm_mode):
+        self.run(tp_size=8,
+                 extra_convert_args=[
+                     f"--moe_tp_size={moe_tp_size}",
+                     f"--moe_ep_size={8 // moe_tp_size}",
+                     f"--moe_renorm_mode={moe_renorm_mode}"
+                 ],
+                 extra_build_args=[
+                     "--gemm_plugin=auto", "--moe_plugin=auto",
+                     f"--max_seq_len={8192}"
+                 ])
 
     @skip_pre_ada
     @pytest.mark.skip_less_device(2)
@@ -807,6 +923,43 @@ class TestMixtral8x7B(CliFlowAccuracyTestHarness):
                  pp_size=2,
                  extra_build_args=["--fast_build"])
 
+    @pytest.mark.skip_less_device(2)
+    @pytest.mark.skip_less_device_memory(80000)
+    def test_weight_only_int4_tp2(self):
+        self.run(quant_algo=QuantAlgo.W4A16,
+                 tp_size=2,
+                 extra_build_args=["--gemm_plugin=auto"])
+
+    @pytest.mark.skip_less_device(2)
+    @pytest.mark.skip_less_device_memory(80000)
+    def test_weight_only_int8_tp2(self):
+        self.run(quant_algo=QuantAlgo.W8A16,
+                 tp_size=2,
+                 extra_build_args=["--gemm_plugin=auto"])
+
+    @skip_post_blackwell
+    @pytest.mark.skip_less_device(4)
+    @pytest.mark.skip_less_device_memory(45000)
+    def test_pp_reduce_scatter_tp2pp2(self):
+        self.run(quant_algo=QuantAlgo.W8A16,
+                 tp_size=2,
+                 pp_size=2,
+                 extra_build_args=[
+                     "--gemm_plugin=auto", "--pp_reduce_scatter=enable"
+                 ])
+
+    @skip_pre_blackwell
+    @pytest.mark.skip_less_device_memory(180000)
+    def test_fp4_plugin(self):
+        build_args = [
+            "--max_input_len=2048", "--gemm_plugin=nvfp4",
+            "--use_paged_context_fmha=enable", "--use_fp8_context_fmha=enable"
+        ]
+        self.run(tasks=[MMLU(self.MODEL_NAME)],
+                 quant_algo=QuantAlgo.NVFP4,
+                 kv_cache_quant_algo=QuantAlgo.FP8,
+                 extra_build_args=build_args)
+
     @skip_pre_blackwell
     def test_nvfp4_prequantized(self, mocker):
         mocker.patch.object(
@@ -815,6 +968,45 @@ class TestMixtral8x7B(CliFlowAccuracyTestHarness):
         self.run(tasks=[MMLU(self.MODEL_NAME)],
                  quant_algo=QuantAlgo.NVFP4,
                  kv_cache_quant_algo=QuantAlgo.FP8)
+
+
+class TestMixtral8x22B(CliFlowAccuracyTestHarness):
+    MODEL_NAME = "mistralai/Mixtral-8x22B-v0.1"
+    MODEL_PATH = f"{llm_models_root()}/Mixtral-8x22B-v0.1"
+    EXAMPLE_FOLDER = "models/core/llama"
+
+    @skip_pre_ada
+    @pytest.mark.skip_less_device(4)
+    @pytest.mark.skip_less_device_memory(80000)
+    def test_fp8_tp2pp2(self):
+        self.run(tasks=[CnnDailymail(self.MODEL_NAME),
+                        MMLU(self.MODEL_NAME)],
+                 quant_algo=QuantAlgo.FP8,
+                 tp_size=2,
+                 pp_size=2,
+                 extra_convert_args=["--calib_size=32"],
+                 extra_build_args=["--gemm_plugin=auto"])
+
+    @skip_post_blackwell
+    @pytest.mark.skip_less_device(8)
+    @pytest.mark.skip_less_device_memory(45000)
+    @pytest.mark.parametrize(
+        "moe_tp_size", [1, 4, 8],
+        ids=['expert_parallel', 'mixed_parallel', 'tensor_parallel'])
+    @pytest.mark.parametrize("moe_renorm_mode", [0, 1],
+                             ids=['no_renormalize', 'renormalize'])
+    def test_int8_plugin_tp8(self, moe_tp_size, moe_renorm_mode):
+        self.run(quant_algo=QuantAlgo.W8A16,
+                 tp_size=8,
+                 extra_convert_args=[
+                     f"--moe_tp_size={moe_tp_size}",
+                     f"--moe_ep_size={8 // moe_tp_size}",
+                     f"--moe_renorm_mode={moe_renorm_mode}"
+                 ],
+                 extra_build_args=[
+                     "--max_beam_width=4", "--gemm_plugin=auto",
+                     "--moe_plugin=auto", f"--max_seq_len={8192}"
+                 ])
 
 
 class TestGemma2B(CliFlowAccuracyTestHarness):
@@ -830,6 +1022,7 @@ class TestGemma2B(CliFlowAccuracyTestHarness):
         quant_algo = QuantAlgo.W8A16 if precision == "int8" else QuantAlgo.W4A16
         self.run(quant_algo=quant_algo, extra_convert_args=["--ckpt-type=hf"])
 
+    @skip_post_blackwell
     def test_smooth_quant(self):
         self.run(quant_algo=QuantAlgo.W8A8_SQ_PER_CHANNEL_PER_TOKEN_PLUGIN,
                  extra_convert_args=[
@@ -841,6 +1034,7 @@ class TestGemma2B(CliFlowAccuracyTestHarness):
     def test_fp8(self):
         self.run(quant_algo=QuantAlgo.FP8, kv_cache_quant_algo=QuantAlgo.FP8)
 
+    @skip_post_blackwell
     def test_int4_awq(self):
         self.run(quant_algo=QuantAlgo.W4A16_AWQ)
 
@@ -859,6 +1053,7 @@ class TestGemma7B(CliFlowAccuracyTestHarness):
         quant_algo = QuantAlgo.W8A16 if precision == "int8" else QuantAlgo.W4A16
         self.run(quant_algo=quant_algo, extra_convert_args=["--ckpt-type=hf"])
 
+    @skip_post_blackwell
     @pytest.mark.skip_less_device_memory(50000)
     def test_smooth_quant(self):
         self.run(quant_algo=QuantAlgo.W8A8_SQ_PER_CHANNEL_PER_TOKEN_PLUGIN,
@@ -871,6 +1066,7 @@ class TestGemma7B(CliFlowAccuracyTestHarness):
     def test_fp8(self):
         self.run(quant_algo=QuantAlgo.FP8, kv_cache_quant_algo=QuantAlgo.FP8)
 
+    @skip_post_blackwell
     def test_int4_awq(self):
         self.run(quant_algo=QuantAlgo.W4A16_AWQ)
 
@@ -881,12 +1077,14 @@ class TestGemma2_9BIt(CliFlowAccuracyTestHarness):
     MODEL_PATH = f"{llm_models_root()}/gemma/gemma-2-9b-it"
     EXAMPLE_FOLDER = "models/core/gemma"
 
+    @skip_post_blackwell
     def test_auto_dtype(self):
         self.run(tasks=[CnnDailymail(self.MODEL_NAME),
                         MMLU(self.MODEL_NAME)],
                  dtype='auto',
                  extra_convert_args=["--ckpt-type=hf"])
 
+    @skip_post_blackwell
     @pytest.mark.parametrize("precision", ["int8", "int4"])
     def test_weight_only(self, precision: str):
         quant_algo = QuantAlgo.W8A16 if precision == "int8" else QuantAlgo.W4A16
@@ -910,6 +1108,7 @@ class TestQwen7BChat(CliFlowAccuracyTestHarness):
     def test_weight_only(self):
         self.run(quant_algo=QuantAlgo.W8A16)
 
+    @skip_post_blackwell
     def test_int4_gptq_prequantized(self, mocker):
         mocker.patch.object(self.__class__, "MODEL_PATH",
                             f"{llm_models_root()}/Qwen-7B-Chat-Int4")
@@ -938,6 +1137,7 @@ class TestQwen2_0_5BInstruct(CliFlowAccuracyTestHarness):
     def test_auto_dtype(self):
         self.run(dtype='auto')
 
+    @skip_post_blackwell
     def test_weight_only(self):
         self.run(quant_algo=QuantAlgo.W8A16)
 
@@ -956,9 +1156,11 @@ class TestQwen2_7BInstruct(CliFlowAccuracyTestHarness):
     def test_auto_dtype(self):
         self.run(dtype='auto')
 
+    @skip_post_blackwell
     def test_weight_only(self):
         self.run(quant_algo=QuantAlgo.W8A16)
 
+    @skip_post_blackwell
     def test_int4_awq_prequantized(self, mocker):
         mocker.patch.object(self.__class__, "MODEL_PATH",
                             f"{llm_models_root()}/Qwen2-7B-Instruct-AWQ")
@@ -990,6 +1192,7 @@ class TestQwen2_5_1_5BInstruct(CliFlowAccuracyTestHarness):
     def test_auto_dtype(self):
         self.run(dtype='auto')
 
+    @skip_post_blackwell
     def test_weight_only(self):
         self.run(quant_algo=QuantAlgo.W8A16)
 

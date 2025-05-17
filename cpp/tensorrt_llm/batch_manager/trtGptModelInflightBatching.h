@@ -139,6 +139,12 @@ public:
 
     void terminateRequest(LlmRequestPtr const& llmRequest, bool pause = false) override;
 
+    /// @brief Terminate request in the next forwardSync call that includes the request.
+    /// @details This function does not terminate requests immediately. It will add the requests to the
+    ///          mReqIdsToTerminate set. The requests will be terminated in the next forwardSync call that
+    ///          includes the request in the batch.
+    void terminateRequestSync(LlmRequestPtr const& llmRequest, executor::FinishReason finishReason) override;
+
     /// @brief Function that waits for the decoding of requests in flight.
     ///        When the requests have finished or using speculative decoding, the state of requests
     ///        will become LlmRequestState::kGENERATION_COMPLETE. Else, it will be set to
@@ -291,7 +297,7 @@ private:
         RequestVector const& contextRequests, RequestVector const& generationRequests, SizeType32 bufferId);
 
     void setupDecoderStep(
-        RequestVector const& contextRequests, RuntimeBuffers const& buffers, DecoderInputBuffers const& inputBuffers);
+        RequestVector const& contextRequests, RuntimeBuffers const& buffers, DecoderInputBuffers& inputBuffers);
     runtime::CudaEvent decoderStepAsync(ScheduledRequests const& scheduledRequests);
     std::vector<std::unique_ptr<DecoderStepAsyncSend>> decoderSync(
         ScheduledRequests const& scheduledRequests, std::optional<runtime::CudaEvent> const& decoderFinishEvent);
@@ -534,6 +540,8 @@ private:
     std::vector<ScheduledRequests> mMicroBatchScheduledRequests;
     // Set of in-flight requests of *all* micro batches
     ReqIdsSet mInflightReqIds;
+    // Requests that should be terminated (requested from outside the model)
+    std::unordered_map<RequestIdType, executor::FinishReason> mReqIdsToTerminate;
     // Requests that the scheduler selected to be paused
     ReqIdsSet mReqIdsToPause;
     // Stats collected in last iteration

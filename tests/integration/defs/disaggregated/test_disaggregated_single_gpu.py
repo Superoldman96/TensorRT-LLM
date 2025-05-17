@@ -5,6 +5,7 @@ import sys
 
 import cloudpickle
 import pytest
+from defs.conftest import skip_no_hopper
 from mpi4py import MPI
 from mpi4py.futures import MPIPoolExecutor
 
@@ -109,13 +110,13 @@ def verify_disaggregated(model, generation_overlap, enable_cuda_graph, prompt,
 
     # Context worker
     worker_pytorch_configs.append(
-        PyTorchConfig(enable_overlap_scheduler=False,
+        PyTorchConfig(disable_overlap_scheduler=True,
                       kv_cache_dtype="auto",
                       use_cuda_graph=enable_cuda_graph))
 
     # Generation worker
     worker_pytorch_configs.append(
-        PyTorchConfig(enable_overlap_scheduler=generation_overlap,
+        PyTorchConfig(disable_overlap_scheduler=not generation_overlap,
                       kv_cache_dtype="auto",
                       use_cuda_graph=enable_cuda_graph))
 
@@ -199,6 +200,7 @@ def test_disaggregated_simple_llama(model, generation_overlap,
         ])
 
 
+@skip_no_hopper
 @pytest.mark.parametrize("model", ["DeepSeek-V3-Lite-fp8/fp8"])
 @pytest.mark.parametrize("generation_overlap", [False, True])
 @pytest.mark.parametrize("enable_cuda_graph", [False, True])
@@ -226,13 +228,13 @@ def test_disaggregated_llama_context_capacity(model, enable_cuda_graph,
 
     # Context worker
     worker_pytorch_configs.append(
-        PyTorchConfig(enable_overlap_scheduler=False,
+        PyTorchConfig(disable_overlap_scheduler=True,
                       kv_cache_dtype="auto",
                       use_cuda_graph=enable_cuda_graph))
 
     # Generation worker
     worker_pytorch_configs.append(
-        PyTorchConfig(enable_overlap_scheduler=generation_overlap,
+        PyTorchConfig(disable_overlap_scheduler=not generation_overlap,
                       kv_cache_dtype="auto",
                       use_cuda_graph=enable_cuda_graph))
 

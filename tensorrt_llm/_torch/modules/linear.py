@@ -9,6 +9,7 @@ from torch import nn
 from torch.nn.parameter import Parameter
 
 import tensorrt_llm.quantization.utils.fp4_utils as fp4_utils
+from tensorrt_llm._torch.peft.lora.layer import LoraLayer
 from tensorrt_llm.functional import AllReduceFusionOp, AllReduceParams
 from tensorrt_llm.mapping import Mapping
 
@@ -54,7 +55,7 @@ def load_weight_shard(
 
         def maybe_convert_to_torch_tensor(tensor: torch.Tensor,
                                           indices: slice = None):
-            if indices == None:
+            if indices is None:
                 # Avoid unnecessary copy
                 return tensor.to(device)
             else:
@@ -157,6 +158,7 @@ class Linear(nn.Module):
         reduce_output: bool = True,  # ROW parallel only
         skip_create_weights_in_init: bool = False,
         use_custom_cublas_mm: bool = False,
+        lora: Optional[LoraLayer] = None,
     ):
         from ..distributed import AllReduce
 
@@ -197,6 +199,7 @@ class Linear(nn.Module):
         self._weights_created = False
         self.reduce_output = reduce_output
         self.use_custom_cublas_mm = use_custom_cublas_mm
+        self.lora = lora
 
         if not skip_create_weights_in_init:
             self.create_weights()
@@ -204,55 +207,48 @@ class Linear(nn.Module):
     def create_weights(self):
         if self._weights_created:
             return
-        device = torch.device('cuda')
         weight_shape = (self.out_features, self.in_features)
         self.has_any_quant = False
         self.has_fp8_qdq = False
         self.has_fp8_block_scales = False
         self.has_nvfp4 = False
-        # only _create_weights, and load quantized weight directly.
+
         if self.quant_config and self.quant_config.layer_quant_mode.has_any_quant(
-        ):
+                exclude_kv_cache=True):
             self.has_any_quant = True
             qc = self.quant_config
             if qc.layer_quant_mode.has_fp8_qdq():
                 self.has_fp8_qdq = True
                 self.weight = Parameter(torch.empty(weight_shape,
-                                                    dtype=torch.float8_e4m3fn,
-                                                    device=device),
+                                                    dtype=torch.float8_e4m3fn),
                                         requires_grad=False)
                 self.weight_scale = Parameter(torch.tensor(1.,
-                                                           dtype=torch.float32,
-                                                           device=device),
+                                                           dtype=torch.float32),
                                               requires_grad=False)
                 self.input_scale = Parameter(torch.tensor(1.,
-                                                          dtype=torch.float32,
-                                                          device=device),
+                                                          dtype=torch.float32),
                                              requires_grad=False)
                 self.inv_input_scale = Parameter(torch.tensor(
-                    1., dtype=torch.float32, device=device),
+                    1., dtype=torch.float32),
                                                  requires_grad=False)
             elif qc.layer_quant_mode.has_fp8_block_scales():
                 self.has_fp8_block_scales = True
 
                 self.weight = Parameter(torch.empty(weight_shape,
-                                                    dtype=torch.float8_e4m3fn,
-                                                    device=device),
+                                                    dtype=torch.float8_e4m3fn),
                                         requires_grad=False)
                 scale_shape = (math.ceil(self.out_features / 128),
                                math.ceil(self.in_features / 128))
                 self.weight_scale = Parameter(torch.empty(scale_shape,
-                                                          dtype=torch.float32,
-                                                          device=device),
+                                                          dtype=torch.float32),
                                               requires_grad=False)
                 # Not really used for Gemm now.
                 # Only used to quantize output of FP8 attention.
                 self.input_scale = Parameter(torch.tensor(1.,
-                                                          dtype=torch.float32,
-                                                          device=device),
+                                                          dtype=torch.float32),
                                              requires_grad=False)
                 self.inv_input_scale = Parameter(torch.tensor(
-                    1., dtype=torch.float32, device=device),
+                    1., dtype=torch.float32),
                                                  requires_grad=False)
 
             elif qc.layer_quant_mode.has_nvfp4():
@@ -263,8 +259,7 @@ class Linear(nn.Module):
                 # Quantized weights
                 self.weight = Parameter(torch.empty(
                     [self.out_features, self.in_features // 2],
-                    dtype=fp4_utils.float4_e2m1x2,
-                    device=device),
+                    dtype=fp4_utils.float4_e2m1x2),
                                         requires_grad=False)
 
                 # FP8 per-block scaling factors. dtype must be aligned with SF_DTYPE
@@ -273,57 +268,62 @@ class Linear(nn.Module):
                 ncols = fp4_utils.pad_up(
                     self.in_features // self.scaling_vector_size, 4)
                 self.weight_scale = Parameter(torch.empty(
-                    [nrows * ncols],
-                    dtype=fp4_utils.float4_sf_dtype,
-                    device=device),
+                    [nrows * ncols], dtype=fp4_utils.float4_sf_dtype),
                                               requires_grad=False)
 
                 # FP32 per-tensor global scaling factor = 448*6/amax_input
                 self.input_scale = Parameter(torch.empty([1],
-                                                         dtype=torch.float32,
-                                                         device=device),
+                                                         dtype=torch.float32),
                                              requires_grad=False)
                 self.inv_input_scale = Parameter(torch.empty(
-                    [1], dtype=torch.float32, device=device),
+                    [1], dtype=torch.float32),
                                                  requires_grad=False)
 
                 # (amax_input*amax_weight) / (448*6*448*6)
-                self.alpha = Parameter(torch.empty([1],
-                                                   dtype=torch.float32,
-                                                   device=device),
+                self.alpha = Parameter(torch.empty([1], dtype=torch.float32),
                                        requires_grad=False)
             else:
                 # TODO(zhenhuanc): support other quant mode
                 raise ValueError(f'unsupported quant mode: {qc.quant_mode}')
         else:
-            self.weight = Parameter(torch.empty(weight_shape,
-                                                dtype=self.dtype,
-                                                device=device),
+            self.weight = Parameter(torch.empty(weight_shape, dtype=self.dtype),
                                     requires_grad=False)
 
         if self.has_bias:
             self.bias = Parameter(torch.empty((self.out_features, ),
-                                              dtype=self.dtype,
-                                              device=device),
+                                              dtype=self.dtype),
                                   requires_grad=False)
         else:
             self.register_parameter("bias", None)
         self._weights_created = True
 
-    def apply_linear(self, input, weight, bias):
+    def apply_linear(self,
+                     input,
+                     weight,
+                     bias,
+                     lora_params: Optional[dict] | None = None,
+                     layer_idx: Optional[int] | None = None):
         if self.has_any_quant:
             qc = self.quant_config
             if self.has_fp8_qdq:
+                cur_input_scale = self.input_scale
                 if input.dtype != torch.float8_e4m3fn:
-                    qinput, _ = torch.ops.tensorrt_llm.static_quantize_e4m3_per_tensor(
-                        input, self.input_scale)
+                    if self.input_scale is not None:
+                        # Static quantization
+                        qinput, _ = torch.ops.tensorrt_llm.static_quantize_e4m3_per_tensor(
+                            input, self.input_scale)
+                    else:
+                        # Dynamic quantization
+                        qinput, cur_input_scale = torch.ops.tensorrt_llm.quantize_e4m3_per_tensor(
+                            input)
+                        cur_input_scale = cur_input_scale.to(torch.float32)
                 else:
                     qinput = input
                 # This op does not support bias now.
                 output = torch.ops.trtllm.cublas_scaled_mm(
                     qinput,
                     weight.t(),
-                    scale_a=self.input_scale,
+                    scale_a=cur_input_scale,
                     scale_b=self.weight_scale,
                     bias=None,
                     out_dtype=self.dtype or input.dtype,
@@ -368,6 +368,12 @@ class Linear(nn.Module):
                                                     out_dtype=None)
             else:
                 output = F.linear(input, self.weight, bias)
+
+        if self.lora is not None and bool(lora_params):
+            lora_result = self.lora(input, lora_params, layer_idx)
+            if lora_result is not None:
+                output = output + lora_result
+
         return output
 
     def _maybe_fuse_bias_into_allreduce(
@@ -392,6 +398,8 @@ class Linear(nn.Module):
         input: Union[torch.Tensor, Fp4QuantizedTensor],
         *,
         all_reduce_params: Optional[AllReduceParams] = None,
+        lora_params: Optional[dict] = None,
+        layer_idx: Optional[int] = None,
     ) -> torch.Tensor:
         from ..distributed import allgather
 
@@ -401,19 +409,23 @@ class Linear(nn.Module):
                 fuse_bias = self._maybe_fuse_bias_into_allreduce(
                     bias, all_reduce_params)
                 bias = None if fuse_bias else bias
-                output = self.apply_linear(input, self.weight, bias)
+                output = self.apply_linear(input, self.weight, bias,
+                                           lora_params, layer_idx)
                 output = self.all_reduce(
                     output,
                     all_reduce_params=all_reduce_params,
                 )
             else:
-                output = self.apply_linear(input, self.weight, bias)
+                output = self.apply_linear(input, self.weight, bias,
+                                           lora_params, layer_idx)
         elif self.tp_mode == TensorParallelMode.COLUMN:
-            output = self.apply_linear(input, self.weight, self.bias)
+            output = self.apply_linear(input, self.weight, self.bias,
+                                       lora_params, layer_idx)
             if self.gather_output:
                 output = allgather(output, self.mapping)
         else:
-            output = self.apply_linear(input, self.weight, self.bias)
+            output = self.apply_linear(input, self.weight, self.bias,
+                                       lora_params, layer_idx)
 
         return output
 
@@ -421,6 +433,9 @@ class Linear(nn.Module):
         assert self._weights_created
 
         def _copy(dst: Parameter, src: torch.Tensor):
+            # TODO check that is it a reasonable change or not
+            if dst.dtype != src.dtype:
+                src = src.to(dst.dtype)
             assert dst.dtype == src.dtype, f"Incompatible dtype. dst: {dst.dtype}, src: {src.dtype}"
             dst.data.copy_(src)
 
@@ -445,9 +460,15 @@ class Linear(nn.Module):
                 if quant_mode.has_fp8_qdq():
                     input_scale, weight_scale = load_weight_scales_fp8_qdq(
                         weights)
-                    _copy(self.input_scale, input_scale[0])
+                    if len(input_scale) != 0:
+                        # Static quantization
+                        _copy(self.input_scale, input_scale[0])
+                        self.inv_input_scale.data = 1.0 / self.input_scale
+                    else:
+                        # Dynamic quantization
+                        self.input_scale = None
+                        self.inv_input_scale = None
                     _copy(self.weight_scale, weight_scale[0])
-                    self.inv_input_scale.data = 1.0 / self.input_scale
                 elif quant_mode.has_nvfp4():
                     input_scale, weight_scale, alpha = load_weight_scales_nvfp4(
                         weights,
@@ -492,7 +513,12 @@ class Linear(nn.Module):
                 if quant_mode.has_fp8_qdq():
                     input_scale, weight_scale = load_weight_scales_fp8_qdq(
                         weights)
-                    _copy(self.input_scale, max(input_scale))
+                    if len(input_scale) != 0:
+                        # Static quantization
+                        _copy(self.input_scale, max(input_scale))
+                    else:
+                        # Dynamic quantization
+                        self.input_scale = None
                     _copy(self.weight_scale, max(weight_scale))
                     q_weight = q_weight.to(self.dtype) * weight_scale[0]
                     k_weight = k_weight.to(self.dtype) * weight_scale[1]
@@ -554,7 +580,12 @@ class Linear(nn.Module):
                 if quant_mode.has_fp8_qdq():
                     input_scale, weight_scale = load_weight_scales_fp8_qdq(
                         weights)
-                    _copy(self.input_scale, max(input_scale))
+                    if len(input_scale) != 0:
+                        # Static quantization
+                        _copy(self.input_scale, max(input_scale))
+                    else:
+                        # Dynamic quantization
+                        self.input_scale = None
                     _copy(self.weight_scale, max(weight_scale))
                     gate_weight = gate_weight.to(self.dtype) * weight_scale[0]
                     up_weight = up_weight.to(self.dtype) * weight_scale[1]
